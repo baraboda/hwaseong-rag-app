@@ -47,7 +47,6 @@ exports.handler = async (event) => {
     const seenIds = new Set();
     const documents = [];
     
-    // 키워드 매칭 먼저
     if (keywordDocs) {
       for (const doc of keywordDocs) {
         seenIds.add(doc.id);
@@ -55,7 +54,6 @@ exports.handler = async (event) => {
       }
     }
     
-    // 벡터 결과 추가 (중복 제외)
     if (vectorDocs) {
       for (const doc of vectorDocs) {
         if (!seenIds.has(doc.id)) {
@@ -77,9 +75,9 @@ exports.handler = async (event) => {
     }
 
     // 4. Claude 분석
-    const context = documents.slice(0, 8).map((doc, i) => {
+    const context = documents.slice(0, 10).map((doc, i) => {
       const m = doc.metadata || {};
-      return `[문서 ${i+1}] 유형: ${m.meeting_type} | 날짜: ${m.date} | 출처: ${m.source}\n${doc.content}`;
+      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || '미상'} | 출처: ${m.source || ''} | 회차: ${m.session_num || ''}\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -91,20 +89,31 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
+        max_tokens: 4000,
         messages: [{
           role: 'user',
           content: `검색어: "${query}"
 
-아래 문서들을 분석해서 검색어와 관련된 내용을 찾아 답변해주세요.
+아래는 검색된 정부 회의 기록입니다:
 
-문서:
 ${context}
 
-요청:
-1. 검색어가 포함된 문장을 그대로 인용해주세요
-2. 누가 어떤 발언을 했는지 알려주세요
-3. 핵심 내용을 요약해주세요`
+위 문서들을 분석해서 다음을 수행해주세요:
+
+1. **검색어와 직접 관련된 내용이 있는 문서를 모두 찾아주세요.**
+
+2. **각 관련 문서마다 다음을 상세하게 설명해주세요:**
+   - 어떤 회의인지 (날짜, 유형)
+   - 발언자가 누구인지
+   - 무슨 내용을 말했는지 (원문 인용 포함)
+   - 그 발언의 맥락과 배경
+   - 관련 정책이나 후속 조치
+
+3. **관련된 다른 논의나 연관 주제도 있다면 함께 설명해주세요.**
+
+4. **전체적인 핵심 요약을 마지막에 정리해주세요.**
+
+각 문서를 빠짐없이 분석하고, 검색어와 관련된 모든 내용을 상세하게 설명해주세요.`
         }]
       })
     });
@@ -117,7 +126,7 @@ ${context}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         answer,
-        sources: documents.slice(0, 8).map(d => d.metadata)
+        sources: documents.slice(0, 10).map(d => d.metadata)
       })
     };
 
