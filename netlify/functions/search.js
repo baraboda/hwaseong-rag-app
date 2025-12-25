@@ -13,7 +13,7 @@ exports.handler = async (event) => {
   }
 
   try {
-    const { query } = JSON.parse(event.body);
+    const { query, excludeIds = [] } = JSON.parse(event.body);
     const cleanQuery = query.trim();
 
     // 1. 키워드 검색 (ILIKE)
@@ -23,7 +23,7 @@ exports.handler = async (event) => {
       .from('documents')
       .select('id, content, metadata')
       .ilike('content', `%${cleanQuery}%`)
-      .limit(5);
+      .limit(20);
 
     if (exactMatches && exactMatches.length > 0) {
       keywordDocs = exactMatches;
@@ -40,10 +40,10 @@ exports.handler = async (event) => {
         if (looseMatches) {
           keywordDocs = looseMatches.filter(doc => {
             return words.slice(1).every(w => doc.content.includes(w));
-          }).slice(0, 5);
+          });
           
           if (keywordDocs.length === 0) {
-            keywordDocs = looseMatches.slice(0, 5);
+            keywordDocs = looseMatches;
           }
         }
       }
@@ -67,15 +67,16 @@ exports.handler = async (event) => {
 
     const { data: vectorDocs } = await supabase.rpc('match_documents', {
       query_embedding: queryEmbedding,
-      match_count: 10
+      match_count: 20
     });
 
-    // 3. 결과 합치기
+    // 3. 결과 합치기 (excludeIds 제외)
+    const excludeSet = new Set(excludeIds);
     const seenIds = new Set();
     const combinedDocs = [];
     
     for (const doc of keywordDocs) {
-      if (!seenIds.has(doc.id)) {
+      if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
         seenIds.add(doc.id);
         combinedDocs.push(doc);
       }
@@ -83,36 +84,38 @@ exports.handler = async (event) => {
 
     if (vectorDocs) {
       for (const doc of vectorDocs) {
-        if (!seenIds.has(doc.id)) {
+        if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
           seenIds.add(doc.id);
           combinedDocs.push(doc);
         }
       }
     }
 
-    const finalDocs = combinedDocs.slice(0, 5);
+    // 4. 첫 번째 문서만 선택
+    const currentDoc = combinedDocs[0];
+    const hasMore = combinedDocs.length > 1;
 
-    if (finalDocs.length === 0) {
+    if (!currentDoc) {
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          answer: '관련된 기록을 찾지 못했습니다.',
-          sources: []
+          answer: '더 이상 관련 기록이 없습니다.',
+          sources: [],
+          hasMore: false,
+          currentId: null
         })
       };
     }
 
-    // 4. Context 구성
-    const context = finalDocs.map((doc, i) => {
-      const m = doc.metadata || {};
-      return `[문서 ${i+1}]
+    // 5. Context 구성 (현재 문서 1개만)
+    const m = currentDoc.metadata || {};
+    const context = `[문서]
 - 유형: ${m.meeting_type || '미상'}
 - 날짜: ${m.date || '미상'}
-- 내용: ${doc.content}`;
-    }).join('\n\n---\n\n');
+- 내용: ${currentDoc.content}`;
 
-    // 5. Claude 요청 (전문가 페르소나 + 날짜별 분리)
+    // 6. Claude 요청
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -129,7 +132,7 @@ exports.handler = async (event) => {
 
 검색어: "${cleanQuery}"
 
-[검색된 문서 조각들]:
+[검색된 문서]:
 """
 ${context}
 """
@@ -140,15 +143,11 @@ ${context}
 3. 선거전략가: 이 쟁점이 정치적으로 어떤 의미를 갖는지, 유권자 반응 예측 분석.
 
 [답변 가이드]
-1. [검색된 문서 조각들]에서 검색어와 관련된 내용이 단 한 줄이라도 있으면 모두 찾아내세요.
-2. 발견된 내용을 **날짜별/회의별로 분리해서 각각 나열**하세요. (내용이 중복되어도 합치지 말고 각각 서술)
-3. 예시 형식:
-   - [2025-08-21 차관회의]: ...내용...
-   - [2025-08-26 국무회의]: ...내용...
-4. 검색어와 관련 없는 문서는 언급하지 마세요.
+1. 이 문서에서 검색어와 관련된 내용을 찾아 설명하세요.
+2. 검색어와 관련 없으면 "이 문서에는 관련 내용이 없습니다"라고 답변.
 
 [분석 프로세스]
-1단계: 관련 내용 날짜별 정리
+1단계: 관련 내용 정리
 2단계: 시민소통 전문가 관점 - 쉬운 설명
 3단계: 정책분석가 관점 - 국가적 맥락, 트렌드
 4단계: 선거전략가 관점 - 정치적 함의
@@ -165,7 +164,9 @@ ${context}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         answer,
-        sources: finalDocs.map(d => d.metadata)
+        sources: [currentDoc.metadata],
+        hasMore,
+        currentId: currentDoc.id
       })
     };
 
