@@ -15,25 +15,14 @@ exports.handler = async (event) => {
   try {
     const { query } = JSON.parse(event.body);
 
-    // 1. 키워드 검색 먼저
-    const { data: keywordDocs, error: keywordError } = await supabase
+    // 1. 키워드 검색 (ILIKE 사용)
+    const { data: keywordDocs } = await supabase
       .from('documents')
       .select('id, content, metadata')
-      .textSearch('content', query.split(' ').join(' & '))
-      .limit(5);
+      .or(query.split(' ').map(word => `content.ilike.%${word}%`).join(','))
+      .limit(10);
 
-    // 2. 키워드 검색 실패하면 ILIKE로 시도
-    let keywordResults = keywordDocs || [];
-    if (keywordResults.length === 0) {
-      const { data: ilikeDocs } = await supabase
-        .from('documents')
-        .select('id, content, metadata')
-        .ilike('content', `%${query.split(' ')[0]}%`)
-        .limit(5);
-      keywordResults = ilikeDocs || [];
-    }
-
-    // 3. 벡터 검색
+    // 2. 벡터 검색
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -54,18 +43,20 @@ exports.handler = async (event) => {
       match_count: 10
     });
 
-    // 4. 결과 합치기 (키워드 우선)
+    // 3. 결과 합치기 (키워드 우선)
     const seenIds = new Set();
     const combined = [];
     
-    for (const doc of keywordResults) {
-      if (!seenIds.has(doc.id)) {
-        seenIds.add(doc.id);
-        combined.push(doc);
+    if (keywordDocs && keywordDocs.length > 0) {
+      for (const doc of keywordDocs) {
+        if (!seenIds.has(doc.id)) {
+          seenIds.add(doc.id);
+          combined.push(doc);
+        }
       }
     }
     
-    if (vectorDocs) {
+    if (vectorDocs && vectorDocs.length > 0) {
       for (const doc of vectorDocs) {
         if (!seenIds.has(doc.id)) {
           seenIds.add(doc.id);
@@ -76,7 +67,7 @@ exports.handler = async (event) => {
 
     const documents = combined.slice(0, 10);
 
-    if (!documents || documents.length === 0) {
+    if (documents.length === 0) {
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -87,10 +78,10 @@ exports.handler = async (event) => {
       };
     }
 
-    // 5. Claude 분석
+    // 4. Claude 분석
     const context = documents.map((doc, i) => {
       const m = doc.metadata || {};
-      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || ''}\n${doc.content}`;
+      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || ''} | 출처: ${m.source || ''}\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -105,16 +96,21 @@ exports.handler = async (event) => {
         max_tokens: 1500,
         messages: [{
           role: 'user',
-          content: `당신은 정부 회의 기록 분석 전문가입니다.
+          content: `정부 회의 기록을 분석해주세요.
 
 검색어: "${query}"
 
-관련 문서:
+검색된 문서:
 """
 ${context}
 """
 
-위 문서에서 검색어와 관련된 내용을 찾아 요약해주세요. 누가 무슨 발언을 했는지 구체적으로 인용해주세요.`
+검색어와 관련된 내용을 찾아서:
+1. 핵심 내용 요약
+2. 누가 무슨 발언을 했는지 인용
+3. 관련 정책/조치 설명
+
+문서에 있는 내용만 답변해주세요.`
         }]
       })
     });
