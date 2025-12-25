@@ -14,22 +14,8 @@ exports.handler = async (event) => {
 
   try {
     const { query } = JSON.parse(event.body);
-    
-    // 검색어를 단어로 분리
-    const words = query.trim().split(/\s+/).filter(w => w.length >= 2);
 
-    // 1. 각 단어별로 ILIKE 검색 (OR 조건)
-    let keywordDocs = [];
-    for (const word of words) {
-      const { data } = await supabase
-        .from('documents')
-        .select('id, content, metadata')
-        .ilike('content', `%${word}%`)
-        .limit(10);
-      if (data) keywordDocs.push(...data);
-    }
-
-    // 2. 벡터 검색
+    // 벡터 검색
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -45,32 +31,14 @@ exports.handler = async (event) => {
     const embeddingData = await embeddingResponse.json();
     const queryEmbedding = embeddingData.data[0].embedding;
 
-    const { data: vectorDocs } = await supabase.rpc('match_documents', {
+    const { data: documents, error } = await supabase.rpc('match_documents', {
       query_embedding: queryEmbedding,
-      match_count: 10
+      match_count: 5
     });
 
-    // 3. 중복 제거하고 합치기 (키워드 우선)
-    const seenIds = new Set();
-    const documents = [];
-    
-    for (const doc of keywordDocs) {
-      if (!seenIds.has(doc.id)) {
-        seenIds.add(doc.id);
-        documents.push(doc);
-      }
-    }
-    
-    if (vectorDocs) {
-      for (const doc of vectorDocs) {
-        if (!seenIds.has(doc.id)) {
-          seenIds.add(doc.id);
-          documents.push(doc);
-        }
-      }
-    }
+    if (error) throw error;
 
-    if (documents.length === 0) {
+    if (!documents || documents.length === 0) {
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -81,10 +49,9 @@ exports.handler = async (event) => {
       };
     }
 
-    // 4. Claude 분석
-    const context = documents.slice(0, 10).map((doc, i) => {
+    const context = documents.map((doc, i) => {
       const m = doc.metadata || {};
-      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || ''} | 출처: ${m.source || ''}\n${doc.content}`;
+      return `[${i+1}] ${m.meeting_type || ''} | ${m.date || ''}\n${doc.content.substring(0, 800)}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -96,31 +63,10 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 4000,
+        max_tokens: 1000,
         messages: [{
           role: 'user',
-          content: `검색어: "${query}"
-
-아래는 검색된 정부 회의 기록입니다:
-
-${context}
-
-위 문서들을 분석해서 다음을 수행해주세요:
-
-1. **검색어와 직접 관련된 내용이 있는 문서를 모두 찾아주세요.**
-
-2. **각 관련 문서마다 다음을 상세하게 설명해주세요:**
-   - 어떤 회의인지 (날짜, 유형)
-   - 발언자가 누구인지
-   - 무슨 내용을 말했는지 (원문 인용 포함)
-   - 그 발언의 맥락과 배경
-   - 관련 정책이나 후속 조치
-
-3. **관련된 다른 논의나 연관 주제도 있다면 함께 설명해주세요.**
-
-4. **전체적인 핵심 요약을 마지막에 정리해주세요.**
-
-각 문서를 빠짐없이 분석하고, 검색어와 관련된 모든 내용을 상세하게 설명해주세요.`
+          content: `검색어: "${query}"\n\n문서:\n${context}\n\n관련 내용을 요약해주세요.`
         }]
       })
     });
@@ -133,7 +79,7 @@ ${context}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         answer,
-        sources: documents.slice(0, 10).map(d => d.metadata)
+        sources: documents.map(d => d.metadata)
       })
     };
 
