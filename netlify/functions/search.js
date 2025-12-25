@@ -90,7 +90,7 @@ exports.handler = async (event) => {
       }
     }
 
-    const finalDocs = combinedDocs.slice(0, 10);
+    const finalDocs = combinedDocs.slice(0, 5);
 
     if (finalDocs.length === 0) {
       return {
@@ -121,7 +121,7 @@ exports.handler = async (event) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5-20250929',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: 3000,
         messages: [{
           role: 'user',
