@@ -27,7 +27,7 @@ exports.handler = async (event) => {
         model: 'text-embedding-3-small'
       })
     });
-    
+
     const embeddingData = await embeddingResponse.json();
     const queryEmbedding = embeddingData.data[0].embedding;
 
@@ -45,7 +45,7 @@ exports.handler = async (event) => {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          answer: '관련된 국무회의/차관회의 기록을 찾지 못했습니다.',
+          answer: '관련된 회의 기록을 찾지 못했습니다.',
           sources: []
         })
       };
@@ -53,8 +53,11 @@ exports.handler = async (event) => {
 
     // 4. Claude에게 분석 요청
     const context = documents.map((doc, i) => {
-      const m = doc.metadata;
-      return `[회의록 ${i+1}] ${m.meeting_type} | ${m.date} | 제${m.session_num}회\n${doc.content}`;
+      const m = doc.metadata || {};
+      const meetingType = m.meeting_type || '회의';
+      const date = m.date || '날짜미상';
+      const sessionNum = m.session_num || '';
+      return `[회의록 ${i+1}] ${meetingType} | ${date} | 제${sessionNum}회\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -69,26 +72,24 @@ exports.handler = async (event) => {
         max_tokens: 1500,
         messages: [{
           role: 'user',
-          content: `당신은 시군구 지역 이슈와 국가 정책을 연결하는 전문가입니다.
+          content: `당신은 국무회의/차관회의 기록 분석 전문가입니다.
 
-아래는 사용자가 입력한 시군구 관련 이슈/기사/대본입니다:
+아래는 사용자의 검색어입니다:
 """
 ${query}
 """
 
-아래는 관련 국무회의/차관회의 기록입니다:
+아래는 검색된 관련 회의록입니다:
 """
 ${context}
 """
 
-위 회의록을 참고하여:
-1. 시군구 이슈가 어떤 국가 정책과 연결되는지 설명해주세요. 국무회의 및 차관회의의 입장에서 설명해주세요.
-2. 시군구가 어떻게 변화되어야 하는지 국가정책과 관련하여 흐름이 맞도록 제안해주세요.
-3. 기사의 경우 시군구 이슈로 기사를 써주되, 반드시 국가정책과의 연관성을 지어서 기사를 써주세요. 
-4. 영상의 경우 낚시성 제목을 제안해주세요. 어떤 장면 또는 멘트를 넣어야 국가정책과 흐름이 맞는 것인지 제안해주세요.
-5. 추가로 찾아볼 만한 관련 키워드가 있다면 알려주세요
+위 회의록을 바탕으로:
+1. 검색어와 관련된 내용을 요약해주세요.
+2. 어떤 회의에서 어떤 논의가 있었는지 설명해주세요.
+3. 관련 정책이나 후속 조치가 있다면 알려주세요.
 
-만약 관련성이 낮다면 솔직하게 말씀해주세요.`
+회의록 내용을 충실히 인용하여 답변해주세요. 관련 내용이 없으면 솔직하게 말씀해주세요.`
         }]
       })
     });
