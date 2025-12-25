@@ -15,17 +15,18 @@ exports.handler = async (event) => {
   try {
     const { query } = JSON.parse(event.body);
     
-    // 검색어 정리 (특수문자 제거, 공백 정리)
-    const cleanQuery = query.replace(/[%_'"\\]/g, '').trim();
+    // 검색어를 단어로 분리
+    const words = query.trim().split(/\s+/).filter(w => w.length >= 2);
 
-    // 1. 키워드 검색 - RPC 함수 사용
-    const { data: keywordDocs, error: keywordError } = await supabase
-      .rpc('search_content', { search_term: cleanQuery });
-
-    // 키워드 검색 실패하면 벡터만 사용
-    let keywordResults = [];
-    if (!keywordError && keywordDocs) {
-      keywordResults = keywordDocs;
+    // 1. 각 단어별로 ILIKE 검색 (OR 조건)
+    let keywordDocs = [];
+    for (const word of words) {
+      const { data } = await supabase
+        .from('documents')
+        .select('id, content, metadata')
+        .ilike('content', `%${word}%`)
+        .limit(10);
+      if (data) keywordDocs.push(...data);
     }
 
     // 2. 벡터 검색
@@ -49,11 +50,11 @@ exports.handler = async (event) => {
       match_count: 10
     });
 
-    // 3. 결과 합치기
+    // 3. 중복 제거하고 합치기 (키워드 우선)
     const seenIds = new Set();
     const documents = [];
     
-    for (const doc of keywordResults) {
+    for (const doc of keywordDocs) {
       if (!seenIds.has(doc.id)) {
         seenIds.add(doc.id);
         documents.push(doc);
