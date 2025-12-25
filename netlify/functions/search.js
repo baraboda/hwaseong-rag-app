@@ -14,13 +14,19 @@ exports.handler = async (event) => {
 
   try {
     const { query } = JSON.parse(event.body);
+    
+    // 검색어 정리 (특수문자 제거, 공백 정리)
+    const cleanQuery = query.replace(/[%_'"\\]/g, '').trim();
 
-    // 1. 키워드 검색 (단순 ILIKE)
-    const { data: keywordDocs } = await supabase
-      .from('documents')
-      .select('id, content, metadata')
-      .ilike('content', `%${query}%`)
-      .limit(10);
+    // 1. 키워드 검색 - RPC 함수 사용
+    const { data: keywordDocs, error: keywordError } = await supabase
+      .rpc('search_content', { search_term: cleanQuery });
+
+    // 키워드 검색 실패하면 벡터만 사용
+    let keywordResults = [];
+    if (!keywordError && keywordDocs) {
+      keywordResults = keywordDocs;
+    }
 
     // 2. 벡터 검색
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
@@ -43,12 +49,12 @@ exports.handler = async (event) => {
       match_count: 10
     });
 
-    // 3. 키워드 결과 먼저, 그 다음 벡터 결과
+    // 3. 결과 합치기
     const seenIds = new Set();
     const documents = [];
     
-    if (keywordDocs) {
-      for (const doc of keywordDocs) {
+    for (const doc of keywordResults) {
+      if (!seenIds.has(doc.id)) {
         seenIds.add(doc.id);
         documents.push(doc);
       }
@@ -77,7 +83,7 @@ exports.handler = async (event) => {
     // 4. Claude 분석
     const context = documents.slice(0, 10).map((doc, i) => {
       const m = doc.metadata || {};
-      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || '미상'} | 출처: ${m.source || ''} | 회차: ${m.session_num || ''}\n${doc.content}`;
+      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || ''} | 출처: ${m.source || ''}\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
