@@ -25,8 +25,12 @@
       resize: vertical;
     }
     textarea:focus { outline: none; border-color: #3182ce; }
-    button { 
+    .btn-group {
+      display: flex;
+      gap: 10px;
       margin-top: 15px;
+    }
+    button { 
       padding: 15px 40px;
       font-size: 18px;
       background: #2563eb;
@@ -37,6 +41,12 @@
     }
     button:hover { background: #1d4ed8; }
     button:disabled { background: #93c5fd; cursor: not-allowed; }
+    #nextBtn {
+      background: #059669;
+      display: none;
+    }
+    #nextBtn:hover { background: #047857; }
+    #nextBtn.show { display: inline-block; }
     #result { 
       margin-top: 30px;
       padding: 25px;
@@ -63,6 +73,13 @@
       border-radius: 4px;
       border-left: 3px solid #3182ce;
     }
+    .result-count {
+      background: #fef3c7;
+      padding: 10px 15px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
@@ -74,23 +91,38 @@
 - 시군구 반도체 클러스터 교통 대책
 - 기사 본문이나 영상 대본을 붙여넣으세요"></textarea>
   
-  <button id="searchBtn" onclick="search()">🔍 국무회의 연결 찾기</button>
+  <div class="btn-group">
+    <button id="searchBtn" onclick="search(true)">🔍 국무회의 연결 찾기</button>
+    <button id="nextBtn" onclick="search(false)">➡️ 다음 결과</button>
+  </div>
   
   <div id="result"></div>
 
   <script>
-    async function search() {
+    let currentQuery = '';
+    let excludeIds = [];
+    let hasMore = false;
+
+    async function search(isNewSearch) {
       const input = document.getElementById('input').value.trim();
       const resultDiv = document.getElementById('result');
-      const btn = document.getElementById('searchBtn');
+      const searchBtn = document.getElementById('searchBtn');
+      const nextBtn = document.getElementById('nextBtn');
       
       if (!input) {
         alert('시군구 이슈나 기사 내용을 입력해주세요');
         return;
       }
       
-      btn.disabled = true;
-      btn.textContent = '검색 중...';
+      // 새 검색이면 초기화
+      if (isNewSearch) {
+        currentQuery = input;
+        excludeIds = [];
+      }
+      
+      searchBtn.disabled = true;
+      nextBtn.disabled = true;
+      searchBtn.textContent = '검색 중...';
       resultDiv.className = 'show';
       resultDiv.innerHTML = '<p class="loading">국무회의/차관회의 기록을 검색하고 있습니다...</p>';
       
@@ -98,34 +130,55 @@
         const response = await fetch('/.netlify/functions/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: input })
+          body: JSON.stringify({ 
+            query: currentQuery,
+            excludeIds: excludeIds
+          })
         });
         
         const data = await response.json();
         
         if (data.error) {
           resultDiv.innerHTML = `<p style="color:red">오류: ${data.error}</p>`;
+          nextBtn.className = '';
         } else {
-          let html = `<strong>📋 분석 결과</strong>\n\n${data.answer}`;
+          // 현재 ID를 excludeIds에 추가 (다음 검색용)
+          if (data.currentId) {
+            excludeIds.push(data.currentId);
+          }
+          
+          hasMore = data.hasMore;
+          
+          let html = '';
+          
+          // 결과 카운트 표시
+          html += `<div class="result-count">📊 현재 ${excludeIds.length}번째 결과 ${hasMore ? '| 더 많은 결과가 있습니다' : '| 마지막 결과입니다'}</div>`;
+          
+          html += `<strong>📋 분석 결과</strong>\n\n${data.answer}`;
           
           if (data.sources && data.sources.length > 0) {
             html += `\n\n<div class="sources"><strong>📚 참조한 회의록</strong>`;
             data.sources.forEach(s => {
               html += `\n<div class="source-item">
-                <strong>${s.meeting_type}</strong> | ${s.date} | 제${s.session_num}회
+                <strong>${s.meeting_type || '기타'}</strong> | ${s.date || '날짜 미상'} | ${s.filename || ''}
               </div>`;
             });
             html += '</div>';
           }
           
           resultDiv.innerHTML = html;
+          
+          // 다음 결과 버튼 표시 여부
+          nextBtn.className = hasMore ? 'show' : '';
         }
       } catch (err) {
         resultDiv.innerHTML = `<p style="color:red">오류: ${err.message}</p>`;
+        nextBtn.className = '';
       }
       
-      btn.disabled = false;
-      btn.textContent = '🔍 국무회의 연결 찾기';
+      searchBtn.disabled = false;
+      nextBtn.disabled = false;
+      searchBtn.textContent = '🔍 국무회의 연결 찾기';
     }
   </script>
 </body>
