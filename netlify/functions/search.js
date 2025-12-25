@@ -15,7 +15,14 @@ exports.handler = async (event) => {
   try {
     const { query } = JSON.parse(event.body);
 
-    // 1. 질문을 임베딩으로 변환
+    // 1. 키워드 검색 (정확한 텍스트 매칭)
+    const { data: keywordDocs } = await supabase
+      .from('documents')
+      .select('id, content, metadata')
+      .ilike('content', `%${query}%`)
+      .limit(5);
+
+    // 2. 벡터 검색 (의미적 유사도)
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -31,15 +38,40 @@ exports.handler = async (event) => {
     const embeddingData = await embeddingResponse.json();
     const queryEmbedding = embeddingData.data[0].embedding;
 
-    // 2. Supabase에서 유사 문서 검색
-    const { data: documents, error } = await supabase.rpc('match_documents', {
+    const { data: vectorDocs, error } = await supabase.rpc('match_documents', {
       query_embedding: queryEmbedding,
-      match_count: 5
+      match_count: 10
     });
 
     if (error) throw error;
 
-    // 3. 검색 결과가 없으면
+    // 3. 결과 합치기 (키워드 검색 우선, 중복 제거)
+    const seenIds = new Set();
+    const combined = [];
+    
+    // 키워드 매칭 결과 먼저 추가
+    if (keywordDocs) {
+      for (const doc of keywordDocs) {
+        if (!seenIds.has(doc.id)) {
+          seenIds.add(doc.id);
+          combined.push(doc);
+        }
+      }
+    }
+    
+    // 벡터 검색 결과 추가
+    if (vectorDocs) {
+      for (const doc of vectorDocs) {
+        if (!seenIds.has(doc.id)) {
+          seenIds.add(doc.id);
+          combined.push(doc);
+        }
+      }
+    }
+
+    const documents = combined.slice(0, 10);
+
+    // 4. 검색 결과가 없으면
     if (!documents || documents.length === 0) {
       return {
         statusCode: 200,
@@ -51,7 +83,7 @@ exports.handler = async (event) => {
       };
     }
 
-    // 4. Claude에게 분석 요청
+    // 5. Claude에게 분석 요청
     const context = documents.map((doc, i) => {
       const m = doc.metadata || {};
       const meetingType = m.meeting_type || '기타';
@@ -73,7 +105,7 @@ exports.handler = async (event) => {
         max_tokens: 1500,
         messages: [{
           role: 'user',
-          content: `당신은 정부 회의 기록 분석 전문가입니다. 국무회의, 차관회의, 업무보고, 기자간담회 등 모든 유형의 정부 기록을 분석합니다.
+          content: `당신은 정부 회의 기록 분석 전문가입니다.
 
 아래는 사용자의 검색어입니다:
 """
@@ -98,7 +130,7 @@ ${context}
     const claudeData = await claudeResponse.json();
     const answer = claudeData.content[0].text;
 
-    // 5. 결과 반환
+    // 6. 결과 반환
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
