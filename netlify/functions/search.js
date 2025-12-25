@@ -15,7 +15,14 @@ exports.handler = async (event) => {
   try {
     const { query } = JSON.parse(event.body);
 
-    // 벡터 검색
+    // 1. Full Text Search (키워드 정확 매칭)
+    const { data: textDocs } = await supabase
+      .from('documents')
+      .select('id, content, metadata')
+      .textSearch('content', query.split(' ').join(' & '), { type: 'plain' })
+      .limit(5);
+
+    // 2. 벡터 검색 (의미 유사도)
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -31,14 +38,32 @@ exports.handler = async (event) => {
     const embeddingData = await embeddingResponse.json();
     const queryEmbedding = embeddingData.data[0].embedding;
 
-    const { data: documents, error } = await supabase.rpc('match_documents', {
+    const { data: vectorDocs } = await supabase.rpc('match_documents', {
       query_embedding: queryEmbedding,
-      match_count: 5
+      match_count: 10
     });
 
-    if (error) throw error;
+    // 3. 결과 합치기 (textSearch 우선)
+    const seenIds = new Set();
+    const documents = [];
 
-    if (!documents || documents.length === 0) {
+    if (textDocs) {
+      for (const doc of textDocs) {
+        seenIds.add(doc.id);
+        documents.push(doc);
+      }
+    }
+
+    if (vectorDocs) {
+      for (const doc of vectorDocs) {
+        if (!seenIds.has(doc.id)) {
+          seenIds.add(doc.id);
+          documents.push(doc);
+        }
+      }
+    }
+
+    if (documents.length === 0) {
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -49,9 +74,10 @@ exports.handler = async (event) => {
       };
     }
 
-    const context = documents.map((doc, i) => {
+    // 4. Claude 분석
+    const context = documents.slice(0, 10).map((doc, i) => {
       const m = doc.metadata || {};
-      return `[${i+1}] ${m.meeting_type || ''} | ${m.date || ''}\n${doc.content.substring(0, 800)}`;
+      return `[문서 ${i+1}] 유형: ${m.meeting_type || ''} | 날짜: ${m.date || ''}\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -63,10 +89,17 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
+        max_tokens: 2000,
         messages: [{
           role: 'user',
-          content: `검색어: "${query}"\n\n문서:\n${context}\n\n관련 내용을 요약해주세요.`
+          content: `검색어: "${query}"
+
+검색된 문서:
+${context}
+
+위 문서에서 검색어와 관련된 내용을 찾아 상세히 설명해주세요.
+- 관련 내용이 있으면 원문 인용과 함께 설명
+- 발언자, 맥락, 정책 포함`
         }]
       })
     });
@@ -79,7 +112,7 @@ exports.handler = async (event) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         answer,
-        sources: documents.map(d => d.metadata)
+        sources: documents.slice(0, 10).map(d => d.metadata)
       })
     };
 
