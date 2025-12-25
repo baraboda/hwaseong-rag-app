@@ -15,14 +15,25 @@ exports.handler = async (event) => {
   try {
     const { query } = JSON.parse(event.body);
 
-    // 1. 키워드 검색 (정확한 텍스트 매칭)
-    const { data: keywordDocs } = await supabase
+    // 1. 키워드 검색 먼저
+    const { data: keywordDocs, error: keywordError } = await supabase
       .from('documents')
       .select('id, content, metadata')
-      .ilike('content', `%${query}%`)
+      .textSearch('content', query.split(' ').join(' & '))
       .limit(5);
 
-    // 2. 벡터 검색 (의미적 유사도)
+    // 2. 키워드 검색 실패하면 ILIKE로 시도
+    let keywordResults = keywordDocs || [];
+    if (keywordResults.length === 0) {
+      const { data: ilikeDocs } = await supabase
+        .from('documents')
+        .select('id, content, metadata')
+        .ilike('content', `%${query.split(' ')[0]}%`)
+        .limit(5);
+      keywordResults = ilikeDocs || [];
+    }
+
+    // 3. 벡터 검색
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -38,28 +49,22 @@ exports.handler = async (event) => {
     const embeddingData = await embeddingResponse.json();
     const queryEmbedding = embeddingData.data[0].embedding;
 
-    const { data: vectorDocs, error } = await supabase.rpc('match_documents', {
+    const { data: vectorDocs } = await supabase.rpc('match_documents', {
       query_embedding: queryEmbedding,
       match_count: 10
     });
 
-    if (error) throw error;
-
-    // 3. 결과 합치기 (키워드 검색 우선, 중복 제거)
+    // 4. 결과 합치기 (키워드 우선)
     const seenIds = new Set();
     const combined = [];
     
-    // 키워드 매칭 결과 먼저 추가
-    if (keywordDocs) {
-      for (const doc of keywordDocs) {
-        if (!seenIds.has(doc.id)) {
-          seenIds.add(doc.id);
-          combined.push(doc);
-        }
+    for (const doc of keywordResults) {
+      if (!seenIds.has(doc.id)) {
+        seenIds.add(doc.id);
+        combined.push(doc);
       }
     }
     
-    // 벡터 검색 결과 추가
     if (vectorDocs) {
       for (const doc of vectorDocs) {
         if (!seenIds.has(doc.id)) {
@@ -71,7 +76,6 @@ exports.handler = async (event) => {
 
     const documents = combined.slice(0, 10);
 
-    // 4. 검색 결과가 없으면
     if (!documents || documents.length === 0) {
       return {
         statusCode: 200,
@@ -83,14 +87,10 @@ exports.handler = async (event) => {
       };
     }
 
-    // 5. Claude에게 분석 요청
+    // 5. Claude 분석
     const context = documents.map((doc, i) => {
       const m = doc.metadata || {};
-      const meetingType = m.meeting_type || '기타';
-      const date = m.date || '';
-      const sessionNum = m.session_num || '';
-      const source = m.source || '';
-      return `[문서 ${i+1}] 유형: ${meetingType} | 날짜: ${date} | 회차: ${sessionNum} | 출처: ${source}\n${doc.content}`;
+      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || ''}\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -107,22 +107,14 @@ exports.handler = async (event) => {
           role: 'user',
           content: `당신은 정부 회의 기록 분석 전문가입니다.
 
-아래는 사용자의 검색어입니다:
-"""
-${query}
-"""
+검색어: "${query}"
 
-아래는 검색된 관련 문서입니다:
+관련 문서:
 """
 ${context}
 """
 
-위 문서를 바탕으로:
-1. 검색어와 관련된 내용을 찾아 요약해주세요.
-2. 누가 어떤 발언을 했는지 구체적으로 인용해주세요.
-3. 관련 정책이나 후속 조치가 언급되었다면 알려주세요.
-
-문서 내용을 충실히 인용하여 답변해주세요.`
+위 문서에서 검색어와 관련된 내용을 찾아 요약해주세요. 누가 무슨 발언을 했는지 구체적으로 인용해주세요.`
         }]
       })
     });
@@ -130,7 +122,6 @@ ${context}
     const claudeData = await claudeResponse.json();
     const answer = claudeData.content[0].text;
 
-    // 6. 결과 반환
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
