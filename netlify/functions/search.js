@@ -15,11 +15,11 @@ exports.handler = async (event) => {
   try {
     const { query } = JSON.parse(event.body);
 
-    // 1. 키워드 검색 (ILIKE 사용)
+    // 1. 키워드 검색 (단순 ILIKE)
     const { data: keywordDocs } = await supabase
       .from('documents')
       .select('id, content, metadata')
-      .or(query.split(' ').map(word => `content.ilike.%${word}%`).join(','))
+      .ilike('content', `%${query}%`)
       .limit(10);
 
     // 2. 벡터 검색
@@ -43,29 +43,27 @@ exports.handler = async (event) => {
       match_count: 10
     });
 
-    // 3. 결과 합치기 (키워드 우선)
+    // 3. 키워드 결과 먼저, 그 다음 벡터 결과
     const seenIds = new Set();
-    const combined = [];
+    const documents = [];
     
-    if (keywordDocs && keywordDocs.length > 0) {
+    // 키워드 매칭 먼저
+    if (keywordDocs) {
       for (const doc of keywordDocs) {
-        if (!seenIds.has(doc.id)) {
-          seenIds.add(doc.id);
-          combined.push(doc);
-        }
+        seenIds.add(doc.id);
+        documents.push(doc);
       }
     }
     
-    if (vectorDocs && vectorDocs.length > 0) {
+    // 벡터 결과 추가 (중복 제외)
+    if (vectorDocs) {
       for (const doc of vectorDocs) {
         if (!seenIds.has(doc.id)) {
           seenIds.add(doc.id);
-          combined.push(doc);
+          documents.push(doc);
         }
       }
     }
-
-    const documents = combined.slice(0, 10);
 
     if (documents.length === 0) {
       return {
@@ -79,9 +77,9 @@ exports.handler = async (event) => {
     }
 
     // 4. Claude 분석
-    const context = documents.map((doc, i) => {
+    const context = documents.slice(0, 8).map((doc, i) => {
       const m = doc.metadata || {};
-      return `[문서 ${i+1}] 유형: ${m.meeting_type || '기타'} | 날짜: ${m.date || ''} | 출처: ${m.source || ''}\n${doc.content}`;
+      return `[문서 ${i+1}] 유형: ${m.meeting_type} | 날짜: ${m.date} | 출처: ${m.source}\n${doc.content}`;
     }).join('\n\n---\n\n');
 
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -93,24 +91,20 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1500,
+        max_tokens: 2000,
         messages: [{
           role: 'user',
-          content: `정부 회의 기록을 분석해주세요.
+          content: `검색어: "${query}"
 
-검색어: "${query}"
+아래 문서들을 분석해서 검색어와 관련된 내용을 찾아 답변해주세요.
 
-검색된 문서:
-"""
+문서:
 ${context}
-"""
 
-검색어와 관련된 내용을 찾아서:
-1. 핵심 내용 요약
-2. 누가 무슨 발언을 했는지 인용
-3. 관련 정책/조치 설명
-
-문서에 있는 내용만 답변해주세요.`
+요청:
+1. 검색어가 포함된 문장을 그대로 인용해주세요
+2. 누가 어떤 발언을 했는지 알려주세요
+3. 핵심 내용을 요약해주세요`
         }]
       })
     });
@@ -123,7 +117,7 @@ ${context}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         answer,
-        sources: documents.map(d => d.metadata)
+        sources: documents.slice(0, 8).map(d => d.metadata)
       })
     };
 
