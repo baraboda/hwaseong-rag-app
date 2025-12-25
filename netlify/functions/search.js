@@ -16,10 +16,9 @@ exports.handler = async (event) => {
     const { query } = JSON.parse(event.body);
     const cleanQuery = query.trim();
 
-    // 1. 키워드 검색 (ILIKE) - 청크 데이터라 속도 빠름
+    // 1. 키워드 검색 (ILIKE)
     let keywordDocs = [];
 
-    // 전략 A: 입력 문장 전체 포함 (가장 정확)
     const { data: exactMatches } = await supabase
       .from('documents')
       .select('id, content, metadata')
@@ -29,11 +28,9 @@ exports.handler = async (event) => {
     if (exactMatches && exactMatches.length > 0) {
       keywordDocs = exactMatches;
     } else {
-      // 전략 B: 단어별 검색 (입력 문장이 없을 때)
       const words = cleanQuery.split(/\s+/).filter(w => w.length >= 2);
 
       if (words.length > 0) {
-        // 첫 단어로 넓게 찾고 (30개)
         const { data: looseMatches } = await supabase
           .from('documents')
           .select('id, content, metadata')
@@ -41,12 +38,10 @@ exports.handler = async (event) => {
           .limit(30);
 
         if (looseMatches) {
-          // JS에서 나머지 단어도 포함된 것만 남김 (AND 조건)
           keywordDocs = looseMatches.filter(doc => {
             return words.slice(1).every(w => doc.content.includes(w));
           }).slice(0, 5);
           
-          // 필터링 결과 없으면 1단어 매칭 결과라도 사용
           if (keywordDocs.length === 0) {
             keywordDocs = looseMatches.slice(0, 5);
           }
@@ -54,7 +49,7 @@ exports.handler = async (event) => {
       }
     }
 
-    // 2. 벡터 검색 (의미 기반 보완)
+    // 2. 벡터 검색
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -79,14 +74,13 @@ exports.handler = async (event) => {
     const seenIds = new Set();
     const combinedDocs = [];
     
-    // 키워드 우선
     for (const doc of keywordDocs) {
       if (!seenIds.has(doc.id)) {
         seenIds.add(doc.id);
         combinedDocs.push(doc);
       }
     }
-    // 벡터 결과 추가
+
     if (vectorDocs) {
       for (const doc of vectorDocs) {
         if (!seenIds.has(doc.id)) {
@@ -109,16 +103,16 @@ exports.handler = async (event) => {
       };
     }
 
-    // 4. Claude에게 보낼 Context 구성 (자르기 로직 삭제됨)
-    // 청크가 800자이므로 그대로 보내도 10개 합쳐봐야 8000자 내외. Claude 처리 가능.
+    // 4. Context 구성
     const context = finalDocs.map((doc, i) => {
       const m = doc.metadata || {};
       return `[문서 ${i+1}]
-      - 날짜: ${m.date || '미상'}
-      - 내용: ${doc.content}`; // 원본 그대로 전달
+- 유형: ${m.meeting_type || '미상'}
+- 날짜: ${m.date || '미상'}
+- 내용: ${doc.content}`;
     }).join('\n\n---\n\n');
 
-    // 5. Claude 요청
+    // 5. Claude 요청 (전문가 페르소나 + 날짜별 분리)
     const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -128,21 +122,39 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5-20250929',
-        max_tokens: 1500,
+        max_tokens: 3000,
         messages: [{
           role: 'user',
-          content: `당신은 회의록 분석 전문가입니다.
-질문: "${cleanQuery}"
+          content: `당신은 국무회의/차관회의/업무보고 기록을 분석하는 '전문가 자문단'입니다.
+
+검색어: "${cleanQuery}"
 
 [검색된 문서 조각들]:
 """
 ${context}
 """
 
-답변 가이드:
-1. 위 [검색된 문서 조각들]에 있는 내용만으로 답변하세요.
-2. 질문과 관련된 내용이 있다면 구체적인 수치(예: 3800선 등)와 발언 내용을 포함해서 설명하세요.
-3. 문서 조각들이 서로 연결되는 내용이면 종합해서 설명해주세요.`
+[전문가 페르소나]
+1. 시민소통 전문가: 복잡한 행정 이슈를 초등학생도 이해할 수 있게 쉬운 일상어로 풀어 설명. "이게 왜 내 삶에 중요한가?"를 명확히 전달.
+2. 정책분석가: 해당 쟁점의 전국적/세계적 트렌드, 타 지자체 사례, 관련 통계를 바탕으로 객관적 평가.
+3. 선거전략가: 이 쟁점이 정치적으로 어떤 의미를 갖는지, 유권자 반응 예측 분석.
+4. 홍보전문가: 대중의 관심을 끌 수 있는 영상 숏폼 기획 아이디어 제공.
+
+[답변 가이드]
+1. [검색된 문서 조각들]에서 검색어와 관련된 내용이 단 한 줄이라도 있으면 모두 찾아내세요.
+2. 발견된 내용을 **날짜별/회의별로 분리해서 각각 나열**하세요. (내용이 중복되어도 합치지 말고 각각 서술)
+3. 예시 형식:
+   - [2025-08-21 차관회의]: ...내용...
+   - [2025-08-26 국무회의]: ...내용...
+4. 검색어와 관련 없는 문서는 언급하지 마세요.
+
+[분석 프로세스]
+1단계: 관련 내용 날짜별 정리
+2단계: 시민소통 전문가 관점 - 쉬운 설명
+3단계: 정책분석가 관점 - 국가적 맥락, 트렌드
+4단계: 선거전략가 관점 - 정치적 함의
+5단계: 홍보전문가 관점 - 영상 기획 아이디어
+6단계: 종합 정리`
         }]
       })
     });
