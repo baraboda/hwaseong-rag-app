@@ -122,7 +122,7 @@ exports.handler = async (event) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 3000,
+        max_tokens: 1500,
         messages: [{
           role: 'user',
           content: `당신은 국무회의/차관회의/업무보고 기록을 분석하는 '전문가 자문단'입니다.
