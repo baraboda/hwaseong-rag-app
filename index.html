@@ -6,18 +6,18 @@
   <title>시군구 × 국무회의 연결 검색</title>
   <style>
     * { box-sizing: border-box; }
-    body { 
+    body {
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-      max-width: 900px; 
-      margin: 0 auto; 
+      max-width: 900px;
+      margin: 0 auto;
       padding: 20px;
       background: #f5f5f5;
     }
     h1 { color: #1a365d; margin-bottom: 10px; }
     .subtitle { color: #666; margin-bottom: 30px; }
-    textarea { 
-      width: 100%; 
-      height: 150px; 
+    textarea {
+      width: 100%;
+      height: 150px;
       padding: 15px;
       font-size: 16px;
       border: 2px solid #ddd;
@@ -30,7 +30,7 @@
       gap: 10px;
       margin-top: 15px;
     }
-    button { 
+    button {
       padding: 15px 40px;
       font-size: 18px;
       background: #2563eb;
@@ -47,7 +47,7 @@
     }
     #nextBtn:hover { background: #047857; }
     #nextBtn.show { display: inline-block; }
-    #result { 
+    #result {
       margin-top: 30px;
       padding: 25px;
       background: white;
@@ -59,9 +59,9 @@
     }
     #result.show { display: block; }
     .loading { color: #666; font-style: italic; }
-    .sources { 
-      margin-top: 20px; 
-      padding-top: 20px; 
+    .sources {
+      margin-top: 20px;
+      padding-top: 20px;
       border-top: 1px solid #eee;
       font-size: 14px;
       color: #666;
@@ -80,102 +80,150 @@
       margin-bottom: 15px;
       font-size: 14px;
     }
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 18px;
+      background: #2563eb;
+      animation: blink 1s infinite;
+      vertical-align: middle;
+    }
+    @keyframes blink {
+      0%, 50% { opacity: 1; }
+      51%, 100% { opacity: 0; }
+    }
   </style>
 </head>
 <body>
   <h1>🏛️ 시군구 × 국무회의 연결 검색</h1>
   <p class="subtitle">시군구 이슈를 입력하면 관련 국무회의/차관회의 내용을 찾아 연결해드립니다</p>
-  
+
   <textarea id="input" placeholder="예시:
 - 동탄역 환승센터 공사 지연 문제
 - 시군구 반도체 클러스터 교통 대책
 - 기사 본문이나 영상 대본을 붙여넣으세요"></textarea>
-  
+
   <div class="btn-group">
     <button id="searchBtn" onclick="search(true)">🔍 국무회의 연결 찾기</button>
     <button id="nextBtn" onclick="search(false)">➡️ 다음 결과</button>
   </div>
-  
+
   <div id="result"></div>
 
   <script>
     let currentQuery = '';
     let excludeIds = [];
-    let hasMore = false;
 
     async function search(isNewSearch) {
       const input = document.getElementById('input').value.trim();
       const resultDiv = document.getElementById('result');
       const searchBtn = document.getElementById('searchBtn');
       const nextBtn = document.getElementById('nextBtn');
-      
+
       if (!input) {
         alert('시군구 이슈나 기사 내용을 입력해주세요');
         return;
       }
-      
-      // 새 검색이면 초기화
+
       if (isNewSearch) {
         currentQuery = input;
         excludeIds = [];
       }
-      
+
       searchBtn.disabled = true;
       nextBtn.disabled = true;
-      searchBtn.textContent = '검색 중...';
+      searchBtn.textContent = '분석 중...';
       resultDiv.className = 'show';
       resultDiv.innerHTML = '<p class="loading">국무회의/차관회의 기록을 검색하고 있습니다...</p>';
-      
+
       try {
         const response = await fetch('/.netlify/functions/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             query: currentQuery,
             excludeIds: excludeIds
           })
         });
-        
-        const data = await response.json();
-        
-        if (data.error) {
-          resultDiv.innerHTML = `<p style="color:red">오류: ${data.error}</p>`;
-          nextBtn.className = '';
-        } else {
-          // 현재 ID를 excludeIds에 추가 (다음 검색용)
-          if (data.currentId) {
-            excludeIds.push(data.currentId);
-          }
-          
-          hasMore = data.hasMore;
-          
-          let html = '';
-          
-          // 결과 카운트 표시
-          html += `<div class="result-count">📊 현재 ${excludeIds.length}번째 결과 ${hasMore ? '| 더 많은 결과가 있습니다' : '| 마지막 결과입니다'}</div>`;
-          
-          html += `<strong>📋 분석 결과</strong>\n\n${data.answer}`;
-          
-          if (data.sources && data.sources.length > 0) {
-            html += `\n\n<div class="sources"><strong>📚 참조한 회의록</strong>`;
-            data.sources.forEach(s => {
-              html += `\n<div class="source-item">
-                <strong>${s.meeting_type || '기타'}</strong> | ${s.date || '날짜 미상'} | ${s.filename || ''}
-              </div>`;
-            });
-            html += '</div>';
-          }
-          
-          resultDiv.innerHTML = html;
-          
-          // 다음 결과 버튼 표시 여부
-          nextBtn.className = hasMore ? 'show' : '';
+
+        if (!response.ok) {
+          const errText = await response.text();
+          resultDiv.innerHTML = `<p style="color:red">오류 (${response.status}): ${errText}</p>`;
+          searchBtn.disabled = false;
+          nextBtn.disabled = false;
+          searchBtn.textContent = '🔍 국무회의 연결 찾기';
+          return;
         }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let metaParsed = false;
+        let meta = {};
+        let answerText = '';
+
+        // 결과 영역 초기화
+        resultDiv.innerHTML = '';
+        const countDiv = document.createElement('div');
+        const answerDiv = document.createElement('div');
+        const sourcesDiv = document.createElement('div');
+        resultDiv.appendChild(countDiv);
+        resultDiv.appendChild(answerDiv);
+        resultDiv.appendChild(sourcesDiv);
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          // 메타데이터 먼저 파싱
+          if (!metaParsed) {
+            const match = buffer.match(/__META__([\s\S]*?)__META__/);
+            if (match) {
+              meta = JSON.parse(match[1]);
+              if (meta.currentId) excludeIds.push(meta.currentId);
+
+              // 카운트 표시
+              countDiv.className = 'result-count';
+              countDiv.textContent = `📊 현재 ${excludeIds.length}번째 결과 ${meta.hasMore ? '| 더 많은 결과가 있습니다' : '| 마지막 결과입니다'}`;
+
+              // 소스 표시
+              if (meta.source) {
+                const s = meta.source;
+                sourcesDiv.className = 'sources';
+                sourcesDiv.innerHTML = `<strong>📚 참조한 회의록</strong>
+                  <div class="source-item">
+                    <strong>${s.meeting_type || '기타'}</strong> | ${s.date || '날짜 미상'} | ${s.filename || ''}
+                  </div>`;
+              }
+
+              // 다음 결과 버튼
+              nextBtn.className = meta.hasMore ? 'show' : '';
+
+              buffer = buffer.slice(match.index + match[0].length);
+              metaParsed = true;
+            } else {
+              continue;
+            }
+          }
+
+          // 나머지는 Claude 답변 텍스트
+          answerText += buffer;
+          buffer = '';
+          answerDiv.innerHTML = answerText + '<span class="cursor"></span>';
+
+          // 자동 스크롤
+          resultDiv.scrollTop = resultDiv.scrollHeight;
+        }
+
+        // 스트리밍 끝 - 커서 제거
+        answerDiv.innerHTML = answerText;
+
       } catch (err) {
         resultDiv.innerHTML = `<p style="color:red">오류: ${err.message}</p>`;
         nextBtn.className = '';
       }
-      
+
       searchBtn.disabled = false;
       nextBtn.disabled = false;
       searchBtn.textContent = '🔍 국무회의 연결 찾기';
