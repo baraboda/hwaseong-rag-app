@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { stream } = require('@netlify/functions');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
@@ -7,140 +8,129 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-exports.handler = async (event) => {
+exports.handler = stream(async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }
 
-  try {
-    const { query, excludeIds = [] } = JSON.parse(event.body);
-    const cleanQuery = query.trim();
+  const { query, excludeIds = [] } = JSON.parse(event.body);
+  const cleanQuery = query.trim();
+  const encoder = new TextEncoder();
 
-    // 1. 키워드 검색 (ILIKE)
-    let keywordDocs = [];
+  // === 1. 키워드 검색 (ILIKE) ===
+  let keywordDocs = [];
 
-    const { data: exactMatches } = await supabase
-      .from('documents')
-      .select('id, content, metadata')
-      .ilike('content', `%${cleanQuery}%`)
-      .limit(20);
+  const { data: exactMatches } = await supabase
+    .from('documents')
+    .select('id, content, metadata')
+    .ilike('content', `%${cleanQuery}%`)
+    .limit(20);
 
-    if (exactMatches && exactMatches.length > 0) {
-      keywordDocs = exactMatches;
-    } else {
-      const words = cleanQuery.split(/\s+/).filter(w => w.length >= 2);
-
-      if (words.length > 0) {
-        const { data: looseMatches } = await supabase
-          .from('documents')
-          .select('id, content, metadata')
-          .ilike('content', `%${words[0]}%`)
-          .limit(30);
-
-        if (looseMatches) {
-          keywordDocs = looseMatches.filter(doc => {
-            return words.slice(1).every(w => doc.content.includes(w));
-          });
-
-          if (keywordDocs.length === 0) {
-            keywordDocs = looseMatches;
-          }
-        }
+  if (exactMatches && exactMatches.length > 0) {
+    keywordDocs = exactMatches;
+  } else {
+    const words = cleanQuery.split(/\s+/).filter(w => w.length >= 2);
+    if (words.length > 0) {
+      const { data: looseMatches } = await supabase
+        .from('documents')
+        .select('id, content, metadata')
+        .ilike('content', `%${words[0]}%`)
+        .limit(30);
+      if (looseMatches) {
+        keywordDocs = looseMatches.filter(doc =>
+          words.slice(1).every(w => doc.content.includes(w))
+        );
+        if (keywordDocs.length === 0) keywordDocs = looseMatches;
       }
     }
+  }
 
-    // 2. 벡터 검색
+  // === 2. 벡터 검색 ===
+  let queryEmbedding = null;
+  try {
     const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        input: cleanQuery,
-        model: 'text-embedding-3-small'
-      })
+      body: JSON.stringify({ input: cleanQuery, model: 'text-embedding-3-small' })
     });
-
     const embeddingData = await embeddingResponse.json();
-
-    // OpenAI 응답 체크
-    if (!embeddingData.data || !embeddingData.data[0]) {
-      return {
-        statusCode: 500,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          error: 'OpenAI 임베딩 실패: ' + JSON.stringify(embeddingData).slice(0, 200)
-        })
-      };
+    if (embeddingData.data && embeddingData.data[0]) {
+      queryEmbedding = embeddingData.data[0].embedding;
     }
+  } catch (e) {}
 
-    const queryEmbedding = embeddingData.data[0].embedding;
-
-    const { data: vectorDocs } = await supabase.rpc('match_documents', {
+  let vectorDocs = [];
+  if (queryEmbedding) {
+    const { data } = await supabase.rpc('match_documents', {
       query_embedding: queryEmbedding,
       match_count: 20
     });
+    if (data) vectorDocs = data;
+  }
 
-    // 3. 결과 합치기 (excludeIds 제외)
-    const excludeSet = new Set(excludeIds);
-    const seenIds = new Set();
-    const combinedDocs = [];
+  // === 3. 결과 합치기 (excludeIds 제외) ===
+  const excludeSet = new Set(excludeIds);
+  const seenIds = new Set();
+  const combinedDocs = [];
 
-    for (const doc of keywordDocs) {
-      if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
-        seenIds.add(doc.id);
-        combinedDocs.push(doc);
+  for (const doc of keywordDocs) {
+    if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
+      seenIds.add(doc.id);
+      combinedDocs.push(doc);
+    }
+  }
+  for (const doc of vectorDocs) {
+    if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
+      seenIds.add(doc.id);
+      combinedDocs.push(doc);
+    }
+  }
+
+  const currentDoc = combinedDocs[0];
+  const hasMore = combinedDocs.length > 1;
+
+  // === 결과 없음 ===
+  if (!currentDoc) {
+    const readable = new ReadableStream({
+      start(controller) {
+        const meta = JSON.stringify({ source: null, currentId: null, hasMore: false });
+        controller.enqueue(encoder.encode(`__META__${meta}__META__`));
+        controller.enqueue(encoder.encode('더 이상 관련 기록이 없습니다.'));
+        controller.close();
       }
-    }
+    });
+    return {
+      statusCode: 200,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+      body: readable
+    };
+  }
 
-    if (vectorDocs) {
-      for (const doc of vectorDocs) {
-        if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
-          seenIds.add(doc.id);
-          combinedDocs.push(doc);
-        }
-      }
-    }
-
-    // 4. 첫 번째 문서만 선택
-    const currentDoc = combinedDocs[0];
-    const hasMore = combinedDocs.length > 1;
-
-    if (!currentDoc) {
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          answer: '더 이상 관련 기록이 없습니다.',
-          sources: [],
-          hasMore: false,
-          currentId: null
-        })
-      };
-    }
-
-    // 5. Context 구성 (현재 문서 1개만)
-    const m = currentDoc.metadata || {};
-    const context = `[문서]
+  // === 4. Context 구성 ===
+  const m = currentDoc.metadata || {};
+  const context = `[문서]
 - 유형: ${m.meeting_type || '미상'}
 - 날짜: ${m.date || '미상'}
 - 내용: ${currentDoc.content}`;
 
-    // 6. Claude 요청
-    const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1500,
-        messages: [{
-          role: 'user',
-          content: `당신은 국무회의/차관회의/업무보고 기록을 분석하는 '전문가 자문단'입니다.
+  // === 5. Claude 스트리밍 호출 (Opus) ===
+  const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 2500,
+      stream: true,
+      messages: [{
+        role: 'user',
+        content: `당신은 국무회의/차관회의/업무보고 기록을 분석하는 '전문가 자문단'입니다.
 
 검색어: "${cleanQuery}"
 
@@ -164,41 +154,59 @@ ${context}
 3단계: 정책분석가 관점 - 국가적 맥락, 트렌드
 4단계: 선거전략가 관점 - 정치적 함의
 5단계: 종합 정리`
-        }]
-      })
-    });
+      }]
+    })
+  });
 
-    const claudeData = await claudeResponse.json();
+  // === 6. 커스텀 스트림: 메타데이터 + Claude 텍스트 ===
+  const readable = new ReadableStream({
+    async start(controller) {
+      // 메타데이터 먼저 전송
+      const meta = JSON.stringify({
+        source: currentDoc.metadata,
+        currentId: currentDoc.id,
+        hasMore
+      });
+      controller.enqueue(encoder.encode(`__META__${meta}__META__`));
 
-    // Claude 응답 체크
-    if (!claudeData.content || !claudeData.content[0]) {
-      return {
-        statusCode: 500,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          error: 'Claude 응답 실패: ' + JSON.stringify(claudeData).slice(0, 300)
-        })
-      };
+      // Claude SSE 파싱해서 텍스트만 추출
+      const reader = claudeResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('data:')) {
+              const data = trimmed.slice(5).trim();
+              if (data === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+                  controller.enqueue(encoder.encode(parsed.delta.text));
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      } catch (e) {
+        controller.enqueue(encoder.encode('\n\n[오류: ' + e.message + ']'));
+      }
+
+      controller.close();
     }
+  });
 
-    const answer = claudeData.content[0].text;
-
-    return {
-      statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        answer,
-        sources: [currentDoc.metadata],
-        hasMore,
-        currentId: currentDoc.id
-      })
-    };
-
-  } catch (err) {
-    return {
-      statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: err.message })
-    };
-  }
-};
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+    body: readable
+  };
+});
