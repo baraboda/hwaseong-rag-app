@@ -2,6 +2,7 @@
   "name": "hwaseong-rag-app",
   "version": "1.0.0",
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0"
+    "@supabase/supabase-js": "^2.39.0",
+    "@netlify/functions": "^2.8.1"
   }
 }
