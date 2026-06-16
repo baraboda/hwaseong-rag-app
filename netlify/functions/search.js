@@ -41,7 +41,7 @@ exports.handler = async (event) => {
           keywordDocs = looseMatches.filter(doc => {
             return words.slice(1).every(w => doc.content.includes(w));
           });
-          
+
           if (keywordDocs.length === 0) {
             keywordDocs = looseMatches;
           }
@@ -63,6 +63,18 @@ exports.handler = async (event) => {
     });
 
     const embeddingData = await embeddingResponse.json();
+
+    // OpenAI 응답 체크
+    if (!embeddingData.data || !embeddingData.data[0]) {
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error: 'OpenAI 임베딩 실패: ' + JSON.stringify(embeddingData).slice(0, 200)
+        })
+      };
+    }
+
     const queryEmbedding = embeddingData.data[0].embedding;
 
     const { data: vectorDocs } = await supabase.rpc('match_documents', {
@@ -74,7 +86,7 @@ exports.handler = async (event) => {
     const excludeSet = new Set(excludeIds);
     const seenIds = new Set();
     const combinedDocs = [];
-    
+
     for (const doc of keywordDocs) {
       if (!seenIds.has(doc.id) && !excludeSet.has(doc.id)) {
         seenIds.add(doc.id);
@@ -157,6 +169,18 @@ ${context}
     });
 
     const claudeData = await claudeResponse.json();
+
+    // Claude 응답 체크
+    if (!claudeData.content || !claudeData.content[0]) {
+      return {
+        statusCode: 500,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error: 'Claude 응답 실패: ' + JSON.stringify(claudeData).slice(0, 300)
+        })
+      };
+    }
+
     const answer = claudeData.content[0].text;
 
     return {
