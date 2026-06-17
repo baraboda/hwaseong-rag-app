@@ -80,18 +80,6 @@
       margin-bottom: 15px;
       font-size: 14px;
     }
-    .cursor {
-      display: inline-block;
-      width: 8px;
-      height: 18px;
-      background: #2563eb;
-      animation: blink 1s infinite;
-      vertical-align: middle;
-    }
-    @keyframes blink {
-      0%, 50% { opacity: 1; }
-      51%, 100% { opacity: 0; }
-    }
   </style>
 </head>
 <body>
@@ -134,7 +122,7 @@
       nextBtn.disabled = true;
       searchBtn.textContent = '분석 중...';
       resultDiv.className = 'show';
-      resultDiv.innerHTML = '<p class="loading">국무회의/차관회의 기록을 검색하고 있습니다...</p>';
+      resultDiv.innerHTML = '<p class="loading">국무회의/차관회의 기록을 검색하고 분석하고 있습니다... (10~20초)</p>';
 
       try {
         const response = await fetch('/.netlify/functions/search', {
@@ -146,79 +134,31 @@
           })
         });
 
-        if (!response.ok) {
-          const errText = await response.text();
-          resultDiv.innerHTML = `<p style="color:red">오류 (${response.status}): ${errText}</p>`;
-          searchBtn.disabled = false;
-          nextBtn.disabled = false;
-          searchBtn.textContent = '🔍 국무회의 연결 찾기';
-          return;
-        }
+        const data = await response.json();
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let metaParsed = false;
-        let meta = {};
-        let answerText = '';
+        if (data.error) {
+          resultDiv.innerHTML = `<p style="color:red">오류: ${data.error}</p>`;
+          nextBtn.className = '';
+        } else {
+          if (data.currentId) excludeIds.push(data.currentId);
 
-        // 결과 영역 초기화
-        resultDiv.innerHTML = '';
-        const countDiv = document.createElement('div');
-        const answerDiv = document.createElement('div');
-        const sourcesDiv = document.createElement('div');
-        resultDiv.appendChild(countDiv);
-        resultDiv.appendChild(answerDiv);
-        resultDiv.appendChild(sourcesDiv);
+          let html = '';
+          html += `<div class="result-count">📊 현재 ${excludeIds.length}번째 결과 ${data.hasMore ? '| 더 많은 결과가 있습니다' : '| 마지막 결과입니다'}</div>`;
+          html += `<strong>📋 분석 결과</strong>\n\n${data.answer}`;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          // 메타데이터 먼저 파싱
-          if (!metaParsed) {
-            const match = buffer.match(/__META__([\s\S]*?)__META__/);
-            if (match) {
-              meta = JSON.parse(match[1]);
-              if (meta.currentId) excludeIds.push(meta.currentId);
-
-              // 카운트 표시
-              countDiv.className = 'result-count';
-              countDiv.textContent = `📊 현재 ${excludeIds.length}번째 결과 ${meta.hasMore ? '| 더 많은 결과가 있습니다' : '| 마지막 결과입니다'}`;
-
-              // 소스 표시
-              if (meta.source) {
-                const s = meta.source;
-                sourcesDiv.className = 'sources';
-                sourcesDiv.innerHTML = `<strong>📚 참조한 회의록</strong>
-                  <div class="source-item">
-                    <strong>${s.meeting_type || '기타'}</strong> | ${s.date || '날짜 미상'} | ${s.filename || ''}
-                  </div>`;
-              }
-
-              // 다음 결과 버튼
-              nextBtn.className = meta.hasMore ? 'show' : '';
-
-              buffer = buffer.slice(match.index + match[0].length);
-              metaParsed = true;
-            } else {
-              continue;
-            }
+          if (data.sources && data.sources.length > 0) {
+            html += `\n\n<div class="sources"><strong>📚 참조한 회의록</strong>`;
+            data.sources.forEach(s => {
+              html += `\n<div class="source-item">
+                <strong>${(s && s.meeting_type) || '기타'}</strong> | ${(s && s.date) || '날짜 미상'} | ${(s && s.filename) || ''}
+              </div>`;
+            });
+            html += '</div>';
           }
 
-          // 나머지는 Claude 답변 텍스트
-          answerText += buffer;
-          buffer = '';
-          answerDiv.innerHTML = answerText + '<span class="cursor"></span>';
-
-          // 자동 스크롤
-          resultDiv.scrollTop = resultDiv.scrollHeight;
+          resultDiv.innerHTML = html;
+          nextBtn.className = data.hasMore ? 'show' : '';
         }
-
-        // 스트리밍 끝 - 커서 제거
-        answerDiv.innerHTML = answerText;
-
       } catch (err) {
         resultDiv.innerHTML = `<p style="color:red">오류: ${err.message}</p>`;
         nextBtn.className = '';
